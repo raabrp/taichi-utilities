@@ -140,7 +140,7 @@ def precompute_network(N):
 def ti_len(data):
     # assume any expression defined in ti scope
     # that we're trying to sort must be a ti.Vector
-    if isinstance(data, ti.lang.expr.Expr):
+    if isinstance(data, ti.lang.expr.Expr) or isinstance(data, ti.lang.Vector):
         return data.n
     else:
         return data.shape[0]

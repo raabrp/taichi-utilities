@@ -54,20 +54,24 @@ class RandomField:
     @ti.func
     def uint_to_unit_float(x: uint) -> float:
         """
-        32 bit unsigned int -> float in [0, 1)
+        IEEE 754 32 bit unsigned int -> float in [0, 1)
         """
-        return ti.bit_cast((127 << 23) | (x >> 9), float) - 1.0
+        exp = 127 << 23
+        mantissa = x >> 9
+        return ti.bit_cast(exp | mantissa, float) - 1.0
 
     @staticmethod
     @ti.func
     def uint_to_signed_float(x: uint) -> float:
         """
-        32 bit unsigned int -> float in (-1, 1)
+        IEEE 754 32 bit unsigned int -> float in (-1, 1)
         """
-        sign = x >> 31
         exp = 127 << 23
         mantissa = (x << 1) >> 9
-        return ti.bit_cast((sign << 31) | exp | mantissa, float) - 1.0
+        f = ti.bit_cast(exp | mantissa, float) - 1.0
+        if x >> 31: # sign
+            f = -f
+        return f
 
     @staticmethod
     @ti.func
@@ -109,6 +113,10 @@ class RandomField:
         self.step(i_vec)
         s = self.state[i_vec]
         return s[0] + s[3]
+
+    @ti.func
+    def bits(self, i_vec: ti.template(), k: int) -> uint:
+        return self.bits32(i_vec) >> (32 - k)
 
     @ti.func
     def random(self, i_vec: ti.template()) -> float:
