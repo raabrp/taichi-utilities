@@ -20,3 +20,7 @@ MIT License.
 
 + Single input can be parallelized across GPU threads for large N
 + For small N, can per form a search per-thread.
+
+# Moore-Penrose Pseudo-Inverse (pinv.py)
+
++ Iterative approximation using (Gauss)-Newton

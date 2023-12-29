@@ -8,66 +8,91 @@ Implemented for GPU with Taichi.
 import taichi as ti
 import taichi.math as tm
 
+from twiddle import reverse_bits, int_log2
+
 uint = ti.u32
 
-@ti.func
-def int_log2(x: int) -> int:
-    """
-    Equivalent to int(log2(x)) for 32 bit integer x > 0
-    """
-    l = 0
-    if x & uint(0xFFFF0000):
-        l += 16
-    if x & uint(0xFF00FF00):
-        l += 8
-    if x & uint(0xF0F0F0F0):
-        l += 4
-    if x & uint(0xCCCCCCCC):
-        l += 2
-    if x & uint(0xAAAAAAAA):
-        l += 1
-    return l
-
 
 @ti.func
-def reverse_bits(x: int, bit_size: int) -> int:
+def fft(data: ti.template(), inv: bool):
     """
-    Reverse bit order in integer of bit_size up to 32
+    Multidimensional C2C Cooley-Tukey on power-of-2-length input.
+    FFT performed on all axes.
+    (Called from Taichi scope)
+
+    data:      The data to transform, as a complex-valued ti.field (n=2)
+               Can be multiple dimensions.
+    inv:       Whether to take the inverse transformation.
     """
-    u = ti.bit_cast(x, uint)
-    u = (u >> 16) | (u << 16)
-    u = ((u & uint(0xFF00FF00)) >> 8) | ((u & uint(0x00FF00FF)) << 8)
-    u = ((u & uint(0xF0F0F0F0)) >> 4) | ((u & uint(0x0F0F0F0F)) << 4)
-    u = ((u & uint(0xCCCCCCCC)) >> 2) | ((u & uint(0x33333333)) << 2)
-    u = ((u & uint(0xAAAAAAAA)) >> 1) | ((u & uint(0x55555555)) << 1)
-    u = u >> (32 - bit_size)
-    return ti.bit_cast(u, int)
+
+    # FFT in each dimension. Cannot be parallelized.
+    # Uses compile-time forced loop unrolling
+    for a in ti.static(range(len(data.shape))):
+        fft_1D(data, a, inv)
 
 
 @ti.func
-def permute_reverse_bits(data: ti.template(), axis: int):
+def fft_on_axes(data: ti.template(), axes: ti.template(), inv: bool):
     """
-    Permute elements in data array in-place
-    along given axis
-    by bit-reversing the index in the given axis.
+    Multidimensional C2C Cooley-Tukey on power-of-2-length input.
+    FFT performed on selected axes.
+    (Called from Taichi scope)
+
+    data:      The data to transform, as a complex-valued ti.field (n=2)
+               Can be multiple dimensions.
+    axes:      The index of the dimension to take the FFT over.
+    inv:       Whether to take the inverse transformation.
     """
 
-    # How many bits in the axis index?
-    N = int_log2(ti.Vector(data.shape)[axis])
+    # FFT in each dimension. Cannot be parallelized.
+    # Uses compile-time forced loop unrolling
+    for a in ti.static(range(len(axes))):
+        fft_1D(data, axes[a], inv)
 
+
+@ti.func
+def fft_1D(data: ti.template(), axis: int, inv: bool):
+    """
+    Vectorized C2C Cooley-Tukey on power-of-2-length input.
+    (Called from Taichi scope)
+
+    data:  The data to transform, as a complex-valued ti.field (n=2)
+           Can be multiple dimensions, but only one is transformed.
+    axis:  The index of the dimension over which to take the FFT.
+    inv:   Whether to perform the inverse transformation.
+    """
+
+    # bit-reversal permutation
+    _permute_reverse_bits(data, axis)
+
+    # By conjugate symmetries, we only need to iterate over half of the indices
+    # in the FFT dimension. Precompute the shape to iterate over during the
+    # butterfly layers here.
+    vec_shape = ti.Vector(data.shape)  # convert from tuple to Taichi vector
+    vec_shift = ti.zero(vec_shape)
+    vec_shift[axis] = 1  # one-hot encode axis
+    pshape = vec_shape >> vec_shift  # divides only data.shape[axis] by 2
+
+    # recursive FFTs. Cannot be parallelized.
+    ti.loop_config(serialize=True)
+    for s in range(int_log2(vec_shape[axis])):
+        _apply_butterfly_layer(data, axis, pshape, s, inv)
+
+    # normalize (multiply by 1/N if inverse)
+    _normalize(data, vec_shape[axis], inv)
+
+
+@ti.func
+def _normalize(data: ti.template(), N: int, inv: bool):
+    """
+    Perform normalization. While one could divide by sqrt(N) for both forward
+    and backwards transformations, as is the convention in physics, this is not
+    the standard convention for the FFT.
+    """
     for idx in ti.grouped(data):
-        i = idx[axis]  # get index along given axis
-        _i = reverse_bits(i, N)  # index with bits reversed
+        if inv:
+            data[idx] /= N
 
-        # reindex to account for other dimensions of data array
-        _idx = idx  # copy current index
-        _idx[axis] = _i  # overwrite index along given axis
-
-        # Disambiguate to only perform each swap once
-        if i <= _i:
-            tmp = data[_idx]
-            data[_idx] = data[idx]
-            data[idx] = tmp
 
 @ti.func
 def _apply_butterfly_layer(
@@ -136,119 +161,98 @@ def _apply_butterfly_layer(
 
 
 @ti.func
-def normalize(data: ti.template(), N: int, inv: bool):
+def _permute_reverse_bits(data: ti.template(), axis: int):
     """
-    Perform normalization. While one could divide by sqrt(N) for both forward
-    and backwards transformations, as is the convention in physics, this is not
-    the standard convention for the FFT.
+    Permute elements in data array in-place
+    along given axis
+    by bit-reversing the index in the given axis.
     """
+
+    # How many bits in the axis index?
+    N = int_log2(ti.Vector(data.shape)[axis])
+
     for idx in ti.grouped(data):
-        if inv:
-            data[idx] /= N
+        i = idx[axis]  # get index along given axis
+        _i = reverse_bits(i, N)  # index with bits reversed
+
+        # reindex to account for other dimensions of data array
+        _idx = idx  # copy current index
+        _idx[axis] = _i  # overwrite index along given axis
+
+        # Disambiguate to only perform each swap once
+        if i <= _i:
+            tmp = data[_idx]
+            data[_idx] = data[idx]
+            data[idx] = tmp
 
 
-@ti.func
-def fft_1D(data: ti.template(), axis: int, inv: bool):
-    """
-    Vectorized C2C Cooley-Tukey on power-of-2-length input.
-    (Called from Taichi scope)
-
-    data:  The data to transform, as a complex-valued ti.field (n=2)
-           Can be multiple dimensions, but only one is transformed.
-    axis:  The index of the dimension over which to take the FFT.
-    inv:   Whether to perform the inverse transformation.
-    """
-
-    # bit-reversal permutation
-    permute_reverse_bits(data, axis)
-
-    # By conjugate symmetries, we only need to iterate over half of the indices
-    # in the FFT dimension. Precompute the shape to iterate over during the
-    # butterfly layers here.
-    vec_shape = ti.Vector(data.shape)  # convert from tuple to Taichi vector
-    vec_shift = ti.zero(vec_shape)
-    vec_shift[axis] = 1  # one-hot encode axis
-    pshape = vec_shape >> vec_shift  # divides only data.shape[axis] by 2
-
-    # recursive FFTs. Cannot be parallelized.
-    ti.loop_config(serialize=True)
-    for s in range(int_log2(vec_shape[axis])):
-        _apply_butterfly_layer(data, axis, pshape, s, inv)
-
-    # normalize (multiply by 1/N if inverse)
-    normalize(data, vec_shape[axis], inv)
-
-
-@ti.func
-def fft(data: ti.template(), axes: ti.template(), inv: bool):
-    """
-    Multidimensional C2C Cooley-Tukey on power-of-2-length input.
-    (Called from Python scope)
-
-    data:      The data to transform, as a complex-valued ti.field (n=2)
-               Can be multiple dimensions.
-    axes:      The index of the dimension to take the FFT over.
-    inv:       Whether to take the inverse transformation.
-    """
-
-    # FFT in each dimension. Cannot be parallelized.
-    # Uses compile-time forced loop unrolling
-    for a in ti.static(range(len(axes))):
-        fft_1D(data, axes[a], inv)
-
-
+################################################################################
 
 if __name__ == "__main__":
-
+    import unittest
     import numpy as np
-    import matplotlib.pyplot as plt
 
     ti.init(
-        arch=ti.gpu,
+        arch=ti.cpu,
         default_ip=ti.i32,  # int
         default_fp=ti.f32,  # float
     )
 
     # entry point from Python scope
     @ti.kernel
-    def fft_kernel(data: ti.template(), axes: ti.template(), inv: bool):
-        fft(data, axes, inv)
+    def fft_kernel(data: ti.template(), inv: bool):
+        fft(data, inv)
 
-    # size is 2^ls, square
-    ls = 8
-    size = 1 << ls
-    shape = (size, size)
+    size = 4
+    np_prng = np.random.default_rng(0)
 
-    # create a 2D array with numpy
-    X = np.linspace(-5, 5, size)
-    Y = np.linspace(-5, 5, size)
-    X, Y = np.meshgrid(X, Y)
-    R = np.sqrt(X**2 + Y**2)
-    Z = np.sin(R)
-    z = np.zeros(shape)
+    def load_np_complex_as_vec2(ti_field, np_array):
+        assert ti_field.shape == np_array.shape
+        ti_shape = np_array.shape + (2,)
+        re = np.real(np_array)
+        im = np.imag(np_array)
+        ti_field.from_numpy(np.dstack([re, im]).reshape(ti_shape))
 
-    # Here is the data we wish to transform
-    data = ti.Vector.field(n=2, dtype=float, shape=shape)
-    data.from_numpy(np.dstack([Z, z]))
+    def load_ti_vec2_as_np_complex(ti_field):
+        ti_array = ti_field.to_numpy()
+        re = np.take(ti_array, 0, -1)
+        im = np.take(ti_array, 1, -1)
+        return re + (0 + 1j) * im
 
-    plt.imshow(np.dstack([Z, z, z]))
-    plt.show()
+    class Test(unittest.TestCase):
+        """
+        Test fft against numpy implementation on random inputs
+        """
 
-    # First plot needs to compile the kernels and
-    # transfer data back from GPU to plot.
-    fft_kernel(data, axes=(0, 1), inv=False)
-    fft_kernel(data, axes=(0, 1), inv=True)
+        def test_fft(self):
+            for num_dimensions in [1, 2]:
+                shape = (size,) * num_dimensions
+                ti_field = ti.Vector.field(n=2, dtype=float, shape=shape)
 
-    Z_new = data.to_numpy()
-    plt.imshow(np.dstack([Z_new, z]))
-    plt.show()
+                for _ in range(30):
+                    # generate random input with numpy
+                    re = np_prng.random(shape)
+                    im = np_prng.random(shape)
+                    x = re + (0 + 1j) * im
 
-    # second run is faster since kernels already compiled
-    # The data still has to make the trip from GPU -> CPU
-    # for plotting though.
-    fft_kernel(data, axes=(0, 1), inv=False)
-    fft_kernel(data, axes=(0, 1), inv=True)
+                    # load into taichi field
+                    load_np_complex_as_vec2(ti_field, x)
 
-    Z_new = data.to_numpy()
-    plt.imshow(np.dstack([Z_new, z]))
-    plt.show()
+                    # ti_fft
+                    fft_kernel(ti_field, inv=False)
+                    ti_X = load_ti_vec2_as_np_complex(ti_field)
+
+                    # np_fft
+                    X = x
+                    for d in range(num_dimensions):
+                        X = np.fft.fft(X, axis=d)
+
+                    self.assertTrue(np.allclose(X, ti_X), msg=f"{X}, {ti_X}")
+
+                    # ti_inverse fft
+                    fft_kernel(ti_field, inv=True)
+                    ti_x = load_ti_vec2_as_np_complex(ti_field)
+
+                    self.assertTrue(np.allclose(x, ti_x), msg=f"{x}, {ti_x}")
+
+    unittest.main()
