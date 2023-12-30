@@ -192,6 +192,7 @@ class RandomField:
 
 ################################################################################
 
+# run as python3 -m taichi_utils.prng
 if __name__ == "__main__":
     import unittest
     import numpy as np

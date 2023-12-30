@@ -11,13 +11,14 @@ https://aalexan3.math.ncsu.edu/articles/mat-inv-rep.pdf
 import taichi as ti
 import taichi.math as tm
 
+
 @ti.func
 def step(A: ti.template(), x: ti.template()) -> ti.template():
     return 2.0 * x - x @ A @ x
 
+
 @ti.func
 def pinv(A: ti.template(), n: int) -> ti.template():
-
     b = A @ A.transpose()
     bj = ti.Vector.zero(float, A.n)
 
@@ -37,8 +38,9 @@ def pinv(A: ti.template(), n: int) -> ti.template():
 
     return x
 
-if __name__ == "__main__":
 
+# run as python3 -m taichi_utils.pinv
+if __name__ == "__main__":
     ti.init(
         arch=ti.gpu,
         default_ip=ti.i32,  # int
@@ -49,8 +51,9 @@ if __name__ == "__main__":
 
     @ti.kernel
     def test():
-        A = ti.Matrix([[1., 2.], [3., 4.], [5., 6.]])
+        A = ti.Matrix([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         out[None] = pinv(A, 15) @ A
+
     test()
 
     print(out.to_numpy())

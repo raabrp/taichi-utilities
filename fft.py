@@ -8,7 +8,7 @@ Implemented for GPU with Taichi.
 import taichi as ti
 import taichi.math as tm
 
-from twiddle import reverse_bits, int_log2
+from taichi_utils.twiddle import reverse_bits, int_log2
 
 uint = ti.u32
 
@@ -188,6 +188,7 @@ def _permute_reverse_bits(data: ti.template(), axis: int):
 
 ################################################################################
 
+# run as python3 -m taichi_utils.fft
 if __name__ == "__main__":
     import unittest
     import numpy as np

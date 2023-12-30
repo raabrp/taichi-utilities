@@ -295,6 +295,7 @@ def viz_network(N):
 
 ################################################################################
 
+# run as python3 -m taichi_utils.sort
 if __name__ == "__main__":
     import unittest
     import numpy as np
