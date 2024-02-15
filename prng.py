@@ -5,7 +5,7 @@ the same results.)
 
 32-bit
 
-The underlying method performed in parallel is xoshiro128+.
+The underlying method performed in parallel is xoshiro128++.
 
 An initial random state is provided by numpy (PCG64).
 """
@@ -89,23 +89,34 @@ class RandomField:
         s = tm.sin(t)
         return tm.vec2(r * c, r * s)
 
+    @staticmethod
+    @ti.func
+    def rotl(x: uint, k: int) -> uint:
+        return (x << k) | (x >> (32 - k))
+
     ############################################################################
 
     @ti.func
     def step(self, i_tup: ti.template()):
         """
         Update state of PRNG to next value
+
+        See
+        https://prng.di.unimi.it/xoshiro128plus.c (Public Domain)
+        https://prng.di.unimi.it/xoshiro128starstar.c (Public Domain)
+        https://prng.di.unimi.it/xoshiro128plusplus.c (Public Domain)
         """
-        s = self.state[i_tup]
 
-        self.state[i_tup][2] ^= s[0]
-        self.state[i_tup][3] ^= s[1]
-        self.state[i_tup][1] ^= s[2]
-        self.state[i_tup][0] ^= s[3]
+        t = self.state[i_tup][1] << 9
 
-        self.state[i_tup][2] ^= s[1] << 9
+        self.state[i_tup][2] ^= self.state[i_tup][0]
+        self.state[i_tup][3] ^= self.state[i_tup][1]
+        self.state[i_tup][1] ^= self.state[i_tup][2]
+        self.state[i_tup][0] ^= self.state[i_tup][3]
 
-        self.state[i_tup][3] = (s[3] << 11) | (s[3] >> 21)
+        self.state[i_tup][2] ^= t
+
+        self.state[i_tup][3] = self.rotl(self.state[i_tup][3], 11)
 
     ############################################################################
 
@@ -116,7 +127,10 @@ class RandomField:
         """
         self.step(i_tup)
         s = self.state[i_tup]
-        return s[0] + s[3]
+
+        # return s[0] + s[3]  # xoshiro128+
+        # return self.rotl(s[1] * 5, 7) * 9 # xoshiro128** 1.1
+        return self.rotl(s[0] + s[3], 7) + s[0]  # xoshiro128++
 
     @ti.func
     def bits(self, i_tup: ti.template(), k: int) -> uint:
